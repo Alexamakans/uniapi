@@ -7,9 +7,10 @@ import (
 	"reflect"
 )
 
+// Define types for endpoints.
 type (
-	anyEndpoint           = any
-	anyEndpointReturnType = any
+	anyEndpointReturnType        = any
+	anyEndpointReturnTypePointer = any
 )
 
 var (
@@ -17,56 +18,110 @@ var (
 	ErrInvalidEndpoint = errors.New("invalid endpoint")
 )
 
+// Service defines the API service interface.
 type Service interface {
-	AddEndpoint(method, path string, endpoint anyEndpoint)
-
-	Get(path string, options Options) (anyEndpointReturnType, error)
-	Post(path string, options Options) (anyEndpointReturnType, error)
+	AddEndpoint(method string, endpoint Endpoint)
+	Get(path string, options *Options) (anyEndpointReturnTypePointer, error)
+	Post(path string, options *Options) (anyEndpointReturnTypePointer, error)
 }
 
+// NewService returns a new service instance.
 func NewService(baseUrl string, middlewares ...Middleware) Service {
 	return &service{
+		baseUrl:       baseUrl,
 		middlewares:   middlewares,
-		getEndpoints:  make(map[string]anyEndpoint),
-		postEndpoints: make(map[string]anyEndpoint),
+		getEndpoints:  make(map[string]Endpoint),
+		postEndpoints: make(map[string]Endpoint),
 	}
 }
 
 type service struct {
+	baseUrl       string
 	middlewares   []Middleware
-	getEndpoints  map[string]anyEndpoint
-	postEndpoints map[string]anyEndpoint
+	getEndpoints  map[string]Endpoint
+	postEndpoints map[string]Endpoint
 }
 
-func (o *service) AddEndpoint(method, path string, endpoint anyEndpoint) {
+// AddEndpoint registers an endpoint for a specific HTTP method and path.
+func (o *service) AddEndpoint(method string, endpoint Endpoint) {
+	switch method {
+	case http.MethodGet:
+		o.getEndpoints[endpoint.GetPath()] = endpoint
+	case http.MethodPost:
+		o.postEndpoints[endpoint.GetPath()] = endpoint
+	default:
+		// You might choose to support other methods or log an error.
+	}
 }
 
-func (o *service) Get(path string, options *Options) (any, error) {
+// Get looks up and calls the GET endpoint for the given path.
+func (o *service) Get(path string, options *Options) (anyEndpointReturnTypePointer, error) {
 	endpoint, ok := o.getEndpoints[path]
 	if !ok {
 		return nil, fmt.Errorf("GET %s: %w", path, ErrNoSuchEndpoint)
 	}
-	callField := reflect.ValueOf(endpoint).FieldByName("Call")
-	if !callField.IsValid() {
-		return nil, fmt.Errorf("GET %s: Call property is invalid, must be a method: %w", path, ErrInvalidEndpoint)
+
+	// Retrieve the "Call" method by reflection.
+	callMethod := reflect.ValueOf(endpoint).MethodByName("Call")
+	if !callMethod.IsValid() {
+		return nil, fmt.Errorf("GET %s: Call method is invalid, must be a method: %w", path, ErrInvalidEndpoint)
 	}
 
-	values := callField.Call([]reflect.Value{reflect.ValueOf(http.MethodGet), reflect.ValueOf(options)})
-	result := values[0].Interface()
-	err := values[1].Interface().(error)
-	if err != nil {
-		return nil, err
+	// Call the method with two arguments: HTTP method and options.
+	argValues := []reflect.Value{
+		reflect.ValueOf(http.MethodGet),
+		reflect.ValueOf(o.baseUrl),
+		reflect.ValueOf(options),
+		reflect.ValueOf(o.middlewares),
 	}
+	returnValues := callMethod.Call(argValues)
+	result := returnValues[0].Interface()
+	var err error
+	if !returnValues[1].IsNil() {
+		err = returnValues[1].Interface().(error)
+	}
+	return result, err
 }
 
+// Post looks up and calls the POST endpoint for the given path.
+func (o *service) Post(path string, options *Options) (anyEndpointReturnTypePointer, error) {
+	endpoint, ok := o.postEndpoints[path]
+	if !ok {
+		return nil, fmt.Errorf("POST %s: %w", path, ErrNoSuchEndpoint)
+	}
+
+	// Retrieve the "Call" method by reflection.
+	callMethod := reflect.ValueOf(endpoint).MethodByName("Call")
+	if !callMethod.IsValid() {
+		return nil, fmt.Errorf("POST %s: Call method is invalid, must be a method: %w", path, ErrInvalidEndpoint)
+	}
+
+	// Call the method with two arguments: HTTP method and options.
+	returnValues := callMethod.Call([]reflect.Value{
+		reflect.ValueOf(http.MethodPost),
+		reflect.ValueOf(options),
+	})
+	result := returnValues[0].Interface()
+	var err error
+	if !returnValues[1].IsNil() {
+		err = returnValues[1].Interface().(error)
+	}
+	return result, err
+}
+
+// Call is a generic helper function to call a service endpoint
+// and cast its result to the expected type T.
 func Call[T any](service Service, method, path string, options Options) (*T, error) {
 	var result any
 	var err error
+	// Pass a pointer to options.
 	switch method {
 	case http.MethodGet:
-		result, err = service.Get(path, options)
+		result, err = service.Get(path, &options)
 	case http.MethodPost:
-		result, err = service.Post(path, options)
+		result, err = service.Post(path, &options)
+	default:
+		return nil, fmt.Errorf("unsupported method: %s", method)
 	}
 
 	if err != nil {
