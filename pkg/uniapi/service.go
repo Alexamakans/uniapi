@@ -9,7 +9,6 @@ import (
 
 // Define types for endpoints.
 type (
-	anyEndpointReturnType        = any
 	anyEndpointReturnTypePointer = any
 )
 

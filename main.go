@@ -1,8 +1,8 @@
-package main_test
+package main
 
 import (
+	"log"
 	"net/http"
-	"testing"
 
 	"github.com/Alexamakans/uniapi/pkg/uniapi"
 )
@@ -21,12 +21,21 @@ type TodoList struct {
 	Limit int    `json:"limit"`
 }
 
-func TestUniapi(t *testing.T) {
+func main() {
 	service := uniapi.NewService("https://dummyjson.com", uniapi.UnauthenticatedMiddleware{})
 
 	// TODO: Fix to take strings like '/todos/%d' for path?
 	service.AddEndpoint(http.MethodGet, &uniapi.BaseEndpoint[TodoList]{
 		Path: "/todos",
+		Paginator: &uniapi.SkipLimitPaginator{
+			CountFieldName: "Total",
+			SkipFieldName:  "Skip",
+			LimitFieldName: "Limit",
+			ListFieldName:  "Todos",
+
+			SkipQueryName:  "skip",
+			LimitQueryName: "limit",
+		},
 	})
 
 	todoList, err := uniapi.Call[TodoList](service, http.MethodGet, "/todos", uniapi.Options{})
@@ -34,5 +43,5 @@ func TestUniapi(t *testing.T) {
 		panic(err)
 	}
 
-	t.Logf("%#v", todoList)
+	log.Printf("%#v", todoList)
 }

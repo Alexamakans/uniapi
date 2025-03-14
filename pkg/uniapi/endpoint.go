@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
+	"net/url"
 	"strings"
 )
 
@@ -15,9 +17,10 @@ var (
 )
 
 type Options struct {
+	// PathExtension is used for APIs where the parameters are part of the path.
 	PathExtension []any
 	// Query is the query parameters in the format 'key1=value1&key2=value2' etc.
-	Query string
+	QueryParameters url.Values
 	// Body is the JSON body to send in the request, if any.
 	//
 	// The Content-Type header will be set to 'application/json' before
@@ -25,24 +28,6 @@ type Options struct {
 	Body []byte
 
 	ExtraHeaders map[string]string
-}
-
-// Paginator interface now includes a Merge method for aggregating page results.
-// Implementations of Paginator are free to use any strategy (cursor, skip/limit, etc.)
-type Paginator interface {
-	// Execute should inspect the current aggregated result and request,
-	// and return:
-	//   newResult: the next page of results (as decoded from JSON)
-	//   newRequest: the HTTP request to execute for the next page,
-	//   morePages: true if there are additional pages.
-	//
-	// The base url is provided in case the pagination method requires modifying the url,
-	// as is the case with query and path-based pagination.
-	Execute(currentResult any, baseUrl string, currentRequest *http.Request) (newRequest *http.Request, morePages bool)
-
-	// Merge should combine the current aggregated result with a new page of results.
-	// This is needed because different APIs return different structures.
-	Merge(aggregated any, newPage any) any
 }
 
 type Endpoint interface {
@@ -63,15 +48,18 @@ func (o *BaseEndpoint[T]) GetPath() string {
 // Call constructs and sends an HTTP request using net/http.
 // It returns a pointer to a result of type T which is decoded from the JSON response.
 // If a paginator is set, it will attempt to retrieve additional pages and merge them.
+//
+// If the endpoint requires pagination then the options argument may be modified!
 func (o *BaseEndpoint[T]) Call(method, baseUrl string, options *Options, middlewares []Middleware) (anyEndpointReturnTypePointer, error) {
 	// Create an initial result.
 	result := new(T)
 
 	// Build the URL using the endpoint's Path.
 	url := fmt.Sprintf("%s/%s", strings.TrimRight(baseUrl, "/"), strings.TrimLeft(o.Path, "/"))
-	url = buildUrl(url, options)
+	endpointBaseUrl := url
+	url = ApplyOptionsToURL(url, options)
 
-	req, err := buildRequest(method, url, options, middlewares)
+	req, err := BuildRequest(method, url, options, middlewares)
 	if err != nil {
 		return result, fmt.Errorf("failed building request: %w", err)
 	}
@@ -90,25 +78,26 @@ func (o *BaseEndpoint[T]) Call(method, baseUrl string, options *Options, middlew
 
 		// Loop until there are no more pages.
 		for {
-			newReq, morePages := o.Paginator.Execute(aggregated, baseUrl, currentReq)
+			newReq, morePages := o.Paginator.Execute(aggregated, endpointBaseUrl, options, currentReq, middlewares)
 			if !morePages {
 				break
 			}
 
 			// Decode the next page into a temporary interface.
-			var pageData any
-			if err := doRequest(newReq, client, &pageData); err != nil {
+			pageData := new(T)
+			if err := doRequest(newReq, client, pageData); err != nil {
 				return result, err
 			}
 
 			// Merge the new page into the aggregated result.
-			aggregated = o.Paginator.Merge(aggregated, pageData)
+			var count int
+			aggregated, count = o.Paginator.Merge(aggregated, pageData)
+			log.Printf("count: %d", count)
 
 			// Set currentReq to newReq for the next iteration.
 			currentReq = newReq
 		}
 
-		// Assert that the aggregated result is of the expected type.
 		if final, ok := aggregated.(*T); ok {
 			result = final
 		} else {
@@ -119,19 +108,19 @@ func (o *BaseEndpoint[T]) Call(method, baseUrl string, options *Options, middlew
 	return result, nil
 }
 
-func buildUrl(url string, options *Options) string {
+func ApplyOptionsToURL(url string, options *Options) string {
 	for _, extension := range options.PathExtension {
 		url = strings.TrimRight(url, "/")
 		url = fmt.Sprintf("%s/%v", url, extension)
 	}
 	url = strings.TrimRight(url, "/")
-	if options.Query != "" {
-		url = fmt.Sprintf("%s?%s", url, options.Query)
+	if options.QueryParameters != nil {
+		url = fmt.Sprintf("%s?%s", url, options.QueryParameters.Encode())
 	}
 	return url
 }
 
-func buildRequest(method, url string, options *Options, middlewares []Middleware) (*http.Request, error) {
+func BuildRequest(method, url string, options *Options, middlewares []Middleware) (*http.Request, error) {
 	req, err := http.NewRequest(method, url, bytes.NewBuffer(options.Body))
 	if err != nil {
 		return nil, err
@@ -173,6 +162,7 @@ func doRequest(req *http.Request, client *http.Client, result any) error {
 		return fmt.Errorf("unexpected status code: %d", resp.StatusCode)
 	}
 
+	log.Printf("%s", req.URL.String())
 	decoder := json.NewDecoder(resp.Body)
 	if err := decoder.Decode(result); err != nil {
 		return err
